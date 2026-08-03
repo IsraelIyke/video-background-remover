@@ -1,0 +1,39 @@
+# Model weights -- 122 MB, and rvm_resnet50_fp32.onnx alone exceeds GitHub's
+# 100 MB per-file limit. They are downloaded on first run; see README.md for the
+# release page if the fetch ever fails.
+models/
+
+# ONNX Runtime scratch from symbolic shape inference, regenerated on each load.
+sym_shape_infer_temp.onnx
+*.data
+
+# Source clips and renders. Videos do not belong in git; they bloat every clone
+# forever because history keeps them even after deletion.
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.avi
+*.m4v
+
+# Renders this tool produces, in case a future format escapes the list above.
+*_nobg.*
+*_preview.*
+*_partial.*
+*.part.*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store

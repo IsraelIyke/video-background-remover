@@ -1,0 +1,21 @@
+# Core runtime. Install with:  pip install -r requirements.txt
+#
+# The matting model is downloaded on first run and cached in ./models,
+# so no model package is needed here.
+
+onnxruntime>=1.17     # runs the matting network (CPU by default)
+numpy>=1.24
+opencv-python>=4.8    # matte refinement, background scaling, blur
+
+# ffmpeg is required and is NOT a pip package. Install it separately:
+#   Windows:  winget install Gyan.FFmpeg
+#   macOS:    brew install ffmpeg
+#   Linux:    sudo apt install ffmpeg
+
+# Optional -----------------------------------------------------------------
+# psutil          # slightly better physical-core detection for --workers
+#
+# GPU acceleration: replace onnxruntime with ONE of these, matching your box.
+#   onnxruntime-directml   # any DirectX 12 GPU on Windows (incl. Intel/AMD iGPUs)
+#   onnxruntime-gpu        # NVIDIA CUDA
+# Install the replacement *after* uninstalling onnxruntime; they conflict.
