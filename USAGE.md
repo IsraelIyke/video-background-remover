@@ -158,20 +158,34 @@ person's outline.
 
 | flag | default | notes |
 |---|---|---|
-| `--speed` | `balanced` | `fast` `balanced` `best` `max` ≈ 256/320/512/full px long edge |
+| `--speed` | `balanced` | scale the backbone runs at: `fast` `balanced` `best` `max` = 0.25/0.375/0.5/1.0 |
+| `--resolution` | `1080` | cap the working size to N px on the short edge; `source` keeps the input's |
 | `--model` | `mobilenetv3` | `resnet50` is cleaner on fine hair, 3–6× slower |
 | `--downsample` | — | override the matting scale (0–1); overrides `--speed` |
 | `--crf` | `18` | lower is better; **use 14 if you'll key it** |
 | `--hwenc` | off | H.264 on the Intel/AMD GPU |
 
 `--speed` sets what the backbone sees, not the output resolution — the
-refinement stage still produces a full-resolution matte guided by the original
-frame, which is why edges stay sharp even at `fast`.
+refinement stage rebuilds a full-resolution matte from it, guided by the original
+frame. But the gap between those two sizes is exactly what softens the edge and
+lets background colour bleed into it, so `--speed` is the setting that decides
+edge quality. The presets used to be absolute pixel targets, which becomes a
+smaller and smaller ratio as the source grows: on 4K the old `balanced` target
+of 320px meant a scale factor of 0.083, and the edge band came out 89%
+background-coloured. The ratio is clamped so the backbone's long edge stays
+between 320 and 1600 px, which leaves it untouched from VGA up to 4K.
+
+`--resolution` is the other half of that. Matting a 4K frame costs 4× an HD one
+and does *not* buy a better edge — so the default caps work at 1080 on the short
+edge. A 4K phone clip is processed at 1080×1920, several times faster than
+before and with a cleaner edge. Pass `--resolution source` if you specifically
+need the pixels, and budget for it: 4K ProRes 4444 is ~22 GB per two minutes.
 
 ### Matte refinement
 
 | flag | default | notes |
 |---|---|---|
+| `--no-decontaminate` | on | keep the network's own edge colours, which carry the old background |
 | `--main-subject [N]` | off | keep the N largest subjects |
 | `--choke` | `0` | shrink (−) or grow (+) the cutout, in pixels |
 | `--feather` | `0` | soften the edge, in pixels |

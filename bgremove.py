@@ -15,10 +15,10 @@ from fractions import Fraction
 from pathlib import Path
 
 from bgremover import __version__, formats, models
-from bgremover.matting import SPEED_TARGETS, auto_downsample_ratio, physical_cores
+from bgremover.matting import SPEED_RATIOS, auto_downsample_ratio, physical_cores
 from bgremover.pipeline import PartialResult, Settings, run
-from bgremover.video import (FFmpegMissing, encoder_keeps_alpha, probe,
-                             require_ffmpeg, verify_playable)
+from bgremover.video import (FFmpegMissing, capped_size, encoder_keeps_alpha,
+                             probe, require_ffmpeg, verify_playable)
 
 
 def eprint(*args, **kwargs):
@@ -81,14 +81,20 @@ a note on transparency
                              "Selects mov (ProRes 4444) unless --format says otherwise.")
 
     quality = parser.add_argument_group("quality / speed")
-    quality.add_argument("--speed", choices=list(SPEED_TARGETS), default="balanced",
-                         help="How much detail the network sees. fast/balanced/best/max, "
-                              "roughly 256/320/512/full px on the long edge "
-                              "(default: balanced).")
+    quality.add_argument("--speed", choices=list(SPEED_RATIOS), default="balanced",
+                         help="The scale the network runs at: fast/balanced/best/max "
+                              "= 0.25/0.375/0.5/1.0 of the frame (default: balanced). "
+                              "This, not --resolution, is what decides how clean the "
+                              "edge is.")
     quality.add_argument("--model", default="mobilenetv3",
                          choices=["mobilenetv3", "resnet50"],
                          help="mobilenetv3 is 3-6x faster; resnet50 is slightly cleaner "
                               "on fine hair but painfully slow without a GPU.")
+    quality.add_argument("--resolution", default="1080", metavar="N",
+                         help="Process at most N pixels on the short edge (default: "
+                              "1080, i.e. HD). 'source' keeps the input's own size. "
+                              "4K costs 4x the time and yields no better an edge -- "
+                              "edge quality comes from --speed, not from frame size.")
     quality.add_argument("--downsample", type=float, default=None,
                          help="Override the internal matting scale (0-1). Overrides --speed.")
     quality.add_argument("--crf", type=int, default=18,
@@ -97,6 +103,10 @@ a note on transparency
                          help="Encode H.264 on the Intel/AMD GPU instead of the CPU.")
 
     matte = parser.add_argument_group("matte refinement")
+    matte.add_argument("--no-decontaminate", dest="decontaminate", action="store_false",
+                       help="Keep the network's own edge colours. Those carry the "
+                            "background the subject was shot against, which is what a "
+                            "halo is made of -- only useful for comparison.")
     matte.add_argument("--choke", type=float, default=0.0,
                        help="Shrink (negative) or grow (positive) the cutout, in pixels.")
     matte.add_argument("--feather", type=float, default=0.0,
@@ -156,7 +166,14 @@ def benchmark(args) -> int:
     width, height = 640, 360
     if args.input and args.input.exists():
         info = probe(args.input)
-        width, height = info.width, info.height
+        # Measure the size a real run would work at, or the estimate for a 4K
+        # phone clip comes out four times too pessimistic.
+        try:
+            cap = None if str(args.resolution).strip().lower() in (
+                "source", "native", "full", "none", "0") else int(args.resolution)
+        except ValueError:
+            cap = 1080
+        width, height = capped_size(info.width, info.height, cap)
         total = info.n_frames
     else:
         total = 6571
@@ -175,10 +192,11 @@ def benchmark(args) -> int:
         except Exception as exc:
             eprint(f"  {model_name}: unavailable ({exc})")
             continue
-        presets = list(SPEED_TARGETS) if model_name == "mobilenetv3" else ["balanced"]
+        presets = list(SPEED_RATIOS) if model_name == "mobilenetv3" else ["balanced"]
         for preset in presets:
-            target = SPEED_TARGETS[preset]
-            ratio = 1.0 if target is None else auto_downsample_ratio(width, height, target)
+            preset_ratio = SPEED_RATIOS[preset]
+            ratio = (1.0 if preset_ratio is None
+                     else auto_downsample_ratio(width, height, preset_ratio))
             engine = MattingEngine(path, threads=cores)
             frame = (np.random.rand(height, width, 3) * 255).astype(np.uint8)
             for _ in range(3):
@@ -335,12 +353,29 @@ def main() -> int:
         eprint("error: the selected range contains no frames.")
         return 1
 
+    resolution = str(args.resolution).strip().lower()
+    if resolution in ("source", "native", "full", "none", "0"):
+        cap = None
+    else:
+        try:
+            cap = int(resolution)
+        except ValueError:
+            eprint("error: --resolution wants a pixel count (e.g. 1080) or 'source'.")
+            return 1
+        if cap < 64:
+            eprint("error: --resolution below 64 pixels is not useful.")
+            return 1
+    work_w, work_h = capped_size(info.width, info.height, cap)
+
+    # The ratio has to be derived from the size the network will actually see,
+    # not the source's, or capping the resolution would silently shrink the
+    # backbone along with it and give back the soft edge we just paid to fix.
     if args.downsample is not None:
         downsample = max(0.05, min(1.0, args.downsample))
     else:
-        target = SPEED_TARGETS[args.speed]
-        downsample = 1.0 if target is None else auto_downsample_ratio(
-            info.width, info.height, target)
+        preset_ratio = SPEED_RATIOS[args.speed]
+        downsample = (1.0 if preset_ratio is None
+                      else auto_downsample_ratio(work_w, work_h, preset_ratio))
 
     levels_low, levels_high = 0.0, 1.0
     if args.levels:
@@ -375,6 +410,8 @@ def main() -> int:
         input=args.input, output=output, model=args.model, fmt=args.fmt,
         background=background, downsample=downsample, threads=args.threads,
         quality=args.crf, hwenc=args.hwenc,
+        work_width=work_w, work_height=work_h,
+        decontaminate=args.decontaminate,
         choke=args.choke, feather=args.feather, gamma=args.gamma,
         levels_low=levels_low, levels_high=levels_high, denoise=args.denoise,
         temporal=args.temporal, main_subject=args.main_subject,
@@ -388,8 +425,11 @@ def main() -> int:
            f"{info.width}x{info.height} @ {fps:.3f}fps  {_clock(info.duration)}")
     eprint(f"  processing  {n_frames} frames ({_clock(seconds)})"
            + (f"  from {args.start:g}s" if start_frame else ""))
+    if (work_w, work_h) != (info.width, info.height):
+        eprint(f"  working at  {work_w}x{work_h}  "
+               f"(--resolution source to keep {info.width}x{info.height})")
     eprint(f"  model       RVM {args.model}  scale {downsample:.3f}"
-           f"  ({int(info.width*downsample)}x{int(info.height*downsample)} internally)")
+           f"  ({int(work_w*downsample)}x{int(work_h*downsample)} internally)")
     eprint(f"  output      {args.fmt} -> {output}")
     eprint(f"  background  {background}"
            + ("  (real alpha channel)" if fmt.supports_alpha and background == "none" else ""))
@@ -397,7 +437,7 @@ def main() -> int:
         eprint(f"  subjects    keeping the {args.main_subject} largest; "
                f"smaller people and speckle dropped")
     if transparent_out:
-        hint = _size_hint(args.fmt, info.width, info.height, n_frames)
+        hint = _size_hint(args.fmt, work_w, work_h, n_frames)
         if hint:
             eprint(f"  size        {hint} -- lossless alpha is bulky; an MP4 with a "
                    f"colour behind is ~50x smaller")

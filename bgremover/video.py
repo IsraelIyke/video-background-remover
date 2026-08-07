@@ -118,6 +118,24 @@ def probe(path: Path) -> VideoInfo:
     )
 
 
+def capped_size(width: int, height: int, short_edge: int | None) -> tuple[int, int]:
+    """Scale WxH down until its shorter side is at most `short_edge`.
+
+    Phone video is portrait and desktop video is landscape, but "1080p" means
+    the short side either way, so the cap is expressed on the short side rather
+    than on width or height. Dimensions are forced even, because several
+    encoders reject odd ones.
+    """
+    if not short_edge:
+        return width, height
+    short = min(width, height)
+    if short <= short_edge:
+        return width, height
+    scale = short_edge / short
+    return (max(2, int(round(width * scale)) // 2 * 2),
+            max(2, int(round(height * scale)) // 2 * 2))
+
+
 class FrameReader:
     """Decode a clip to raw RGB24 frames on stdout."""
 

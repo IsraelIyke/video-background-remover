@@ -106,17 +106,47 @@ Matting is ~95% of the run time, and its cost is set almost entirely by how much
 detail the network sees — the `--speed` setting.
 
 ```bash
-python bgremove.py Practice.mp4 --speed fast       # ~256px long edge
-python bgremove.py Practice.mp4 --speed balanced   # ~320px  (default)
-python bgremove.py Practice.mp4 --speed best       # ~512px  (RVM's own recommendation)
+python bgremove.py Practice.mp4 --speed fast       # 0.25 of the frame
+python bgremove.py Practice.mp4 --speed balanced   # 0.375  (default, RVM's HD recommendation)
+python bgremove.py Practice.mp4 --speed best       # 0.5
 python bgremove.py Practice.mp4 --speed max        # full resolution
 ```
 
-The default is `balanced` rather than `best` because it was measured, not
-guessed. Against a full-resolution reference on this footage, a 320px backbone
-changed the matte by a mean of **0.0016 alpha** (99th percentile 0.054) — visually
-indistinguishable — while running about **6× faster**. `best` and `max` exist for
-long flyaway hair or high-resolution sources where the extra detail earns its cost.
+This is the setting that decides how clean your edges are, so it is worth
+understanding. The backbone runs at that fraction of the frame; the refinement
+stage then rebuilds a full-resolution matte from it, guided by the original
+frame. The further those two sizes are apart, the more edge the refinement stage
+has to invent — and what it invents is a wide, soft band whose colour it borrows
+from the background. That band is what a halo is.
+
+Measured on 4K phone footage, this is how far the recovered edge colour sat
+toward the background (0 = clean, 1 = entirely background):
+
+| ratio | 0.167 | 0.25 | 0.375 | 0.5 |
+|---|---|---|---|---|
+| as-is | 0.902 | 0.674 | 0.609 | 0.489 |
+| after decontamination | 0.150 | 0.102 | 0.077 | 0.066 |
+
+These used to be absolute sizes — a target of 256/320/512 px on the long edge —
+which is the wrong thing to hold fixed, because a fixed target becomes a
+shrinking *ratio* as the source grows. On the 640×360 clip they were tuned on,
+320px meant a ratio of 0.5 and was genuinely fine. On 4K it means 0.083.
+
+### Frame size is not edge quality
+
+`--resolution` caps the size the whole pipeline works at, defaulting to **1080**
+on the short edge:
+
+```bash
+python bgremove.py IMG_6377.MOV --transparent                      # HD, the default
+python bgremove.py IMG_6377.MOV --transparent --resolution source  # keep 4K
+```
+
+Processing a 4K frame costs 4× an HD one and buys no better an edge, because
+edge quality comes from `--speed`. HD at `--speed balanced` is both sharper and
+several times faster than 4K was at the old default. Raise it only if you need
+the extra pixels for their own sake — and note that 4K ProRes 4444 runs about
+**22 GB per two minutes**.
 
 Check your own machine before committing to a long run:
 
@@ -157,12 +187,28 @@ The raw matte is usually good as-is. When it isn't:
 --temporal 0.5      # blend with the previous frame if the edge crawls
 ```
 
-A dark halo on a light background usually means `--choke -1`. A hard, cut-out
-look usually wants `--feather 1`.
+A hard, cut-out look usually wants `--feather 1`.
 
-RVM outputs a colour-decontaminated foreground, so edge pixels don't carry a
-tint from whatever was behind them — you can composite onto a light background
-without a dark rim.
+### Halos
+
+A halo is a rim of the *old* background clinging to the subject, and it is most
+obvious when the subject is dark, the room behind them is bright, and they move
+— because then the rim changes colour as they cross the room.
+
+It happens because the network reconstructs the full-resolution foreground as a
+local function of the source frame. Inside the subject that is right. Across the
+semi-transparent edge the only colours available locally are a mix of subject and
+background, so the reconstruction drifts toward whatever was behind them.
+
+The tool fixes this itself, on every run: the edge colours are thrown away and
+re-grown from the pixels that are solidly opaque, which takes the edge band from
+89% background-coloured to 8% on the 4K footage this was measured against. Alpha
+is untouched, so the silhouette, hair and softness are exactly what the network
+produced — only the colour underneath changes.
+
+If a halo survives that, it is the *matte* that is too generous rather than the
+colour, and `--choke -1` is the answer. `--no-decontaminate` turns the fix off,
+which is only useful for seeing what it was doing.
 
 ---
 
@@ -178,13 +224,16 @@ output
   -b, --background SPEC     colour / image / video / blur[:n] / none
 
 quality and speed
-  --speed {fast,balanced,best,max}
+  --speed {fast,balanced,best,max}  what the backbone sees; sets edge quality
+  --resolution N            cap the working size to N px on the short edge
+                            (default 1080); 'source' keeps the input's own
   --model {mobilenetv3,resnet50}    resnet50 is 3-6x slower; rarely worth it on CPU
   --downsample FLOAT        override the internal matting scale directly
   --crf INT                 encoder quality, lower is better (default 18)
   --hwenc                   encode H.264 on the GPU instead of the CPU
 
 matte refinement
+  --no-decontaminate        keep the network's own (background-tinted) edge colours
   --choke, --feather, --alpha-gamma, --levels, --denoise, --temporal
 
 what to process

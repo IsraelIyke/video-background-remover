@@ -59,7 +59,15 @@ class Settings:
     hwenc: bool = False
     io_threads: int | None = None   # cap ffmpeg's own threads when workers share cores
 
+    # Resolution the whole pipeline works at. 0 means "the source's own".
+    # Matting a 4K frame is four times the work of an HD one for an edge that is
+    # no better -- what sharpens the edge is the *ratio* the backbone runs at,
+    # not the pixel count around it -- so capping this is usually a pure win.
+    work_width: int = 0
+    work_height: int = 0
+
     # matte refinement
+    decontaminate: bool = True
     choke: float = 0.0
     feather: float = 0.0
     gamma: float = 1.0
@@ -87,7 +95,9 @@ def process_span(settings: Settings, info: VideoInfo,
     from .matting import MattingEngine
 
     fmt = formats.FORMATS[settings.fmt]
-    width, height = info.width, info.height
+    width = settings.work_width or info.width
+    height = settings.work_height or info.height
+    scale_to = (width, height) if (width, height) != (info.width, info.height) else None
 
     model_path = models.resolve(settings.model)
     engine = MattingEngine(model_path, threads=settings.threads,
@@ -113,9 +123,10 @@ def process_span(settings: Settings, info: VideoInfo,
     out_height = height * 2 if settings.fmt == "stacked" else height
 
     reader = FrameReader(
-        settings.input, width, height,
+        settings.input, info.width, info.height,
         start=_frame_span_to_time(decode_start, info.fps) if decode_start else None,
         duration=(n_decode + 1) / float(info.fps),
+        scale_to=scale_to,
         threads=settings.io_threads,
     )
 
@@ -160,6 +171,12 @@ def process_span(settings: Settings, info: VideoInfo,
                 main_subject=settings.main_subject,
             )
             alpha = smoother(alpha)
+
+            # Must run on the final alpha: it decides which pixels are solid
+            # enough to borrow colour from. Pointless for 'matte', which throws
+            # the colour away.
+            if settings.decontaminate and settings.fmt != "matte":
+                foreground = compositing.decontaminate(foreground, alpha)
 
             if settings.fmt == "matte":
                 out = compositing.to_matte(alpha)

@@ -18,30 +18,57 @@ _OUTPUTS = ["fgr", "pha", "r1o", "r2o", "r3o", "r4o"]
 _STATE_IN = ["r1i", "r2i", "r3i", "r4i"]
 
 
-# Speed presets, expressed as the longest edge the backbone should see. Scaling
-# by a target size rather than a fixed multiplier keeps the presets meaningful
-# across source resolutions.
+# Speed presets, expressed as the scale the backbone runs at.
 #
-# 512 is RVM's own recommendation. Measured on 640x360 talking-head footage,
-# dropping the backbone to a 320px long edge changed the matte by a mean of
-# 0.0016 alpha (99th percentile 0.054) against a full-resolution reference, for
-# roughly 6x the throughput -- so 'balanced' sits there rather than at 512.
-SPEED_TARGETS = {
-    "fast": 256,
-    "balanced": 320,
-    "best": 512,
-    "max": None,     # no downsampling at all
+# These used to be absolute sizes -- a target of 256/320/512 pixels on the long
+# edge -- which is the wrong quantity to hold fixed. What the refinement stage
+# has to do is bridge the gap between the backbone and the full frame, so the
+# thing that decides edge quality is the *ratio* between them, and a fixed
+# target silently becomes a smaller and smaller ratio as the source grows. On
+# 640x360 a 320px target is a ratio of 0.5 and perfectly fine; on 4K phone
+# footage the same number is 0.083, and the refinement stage is left inventing
+# twelve pixels of edge for every one it was given.
+#
+# Measured on that 4K footage, the foreground colour recovered in the edge band
+# sat this far toward the background (0 = clean, 1 = entirely background):
+#
+#     ratio       0.167   0.25    0.375   0.5
+#     as-is       0.902   0.674   0.609   0.489
+#     decontam.   0.150   0.102   0.077   0.066
+#
+# So the ratio drives the halo, and decontaminating the edge afterwards takes
+# most of the remaining sting out of choosing a cheap one. 0.375 is also RVM's
+# own recommendation for HD.
+SPEED_RATIOS = {
+    "fast": 0.25,
+    "balanced": 0.375,   # RVM's own recommendation for HD
+    "best": 0.5,
+    "max": None,         # no downsampling at all
 }
 
+# A ratio stops meaning much at the extremes: on a small frame it can shrink the
+# backbone below the size the network can recognise a person at, and on a very
+# large one it inflates the cost chasing detail the lens never captured. Keep
+# the backbone's long edge inside this band. 320 is the low end because that is
+# the smallest backbone measured to be indistinguishable from full resolution on
+# 640x360 footage; below it there is no evidence either way.
+BACKBONE_MIN, BACKBONE_MAX = 320, 1600
 
-def auto_downsample_ratio(width: int, height: int, target_long_edge: int = 320) -> float:
-    """Shrink so the backbone's longest side lands near `target_long_edge`.
 
-    The backbone runs at this reduced size while the refinement stage still
-    produces a full-resolution matte guided by the original frame -- which is
-    why the edge stays sharp even when the backbone sees very little.
+def auto_downsample_ratio(width: int, height: int, ratio: float = 0.375) -> float:
+    """Clamp a preset ratio to one that keeps the backbone a sensible size.
+
+    The backbone runs at this fraction of the frame while the refinement stage
+    produces a full-resolution matte from it, guided by the original frame. The
+    ratio is returned unchanged for anything between roughly VGA and 4K; it is
+    only raised for very small frames and lowered for very large ones.
     """
-    return max(0.1, min(target_long_edge / max(width, height), 1.0))
+    long_edge = max(width, height, 1)
+    lowest = min(BACKBONE_MIN / long_edge, 1.0)
+    highest = min(BACKBONE_MAX / long_edge, 1.0)
+    # On a frame small enough that both bite, the floor wins: too little detail
+    # is a worse failure than too much cost.
+    return float(min(max(ratio, lowest), max(highest, lowest)))
 
 
 def physical_cores() -> int:
