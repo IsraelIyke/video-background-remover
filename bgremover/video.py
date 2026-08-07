@@ -74,6 +74,20 @@ def probe(path: Path) -> VideoInfo:
 
     width, height = int(video["width"]), int(video["height"])
 
+    # Phone footage is stored in one orientation with a Display Matrix telling
+    # players to rotate it. ffmpeg applies that rotation when decoding, so the
+    # frames arriving on the pipe are already in display orientation -- and for
+    # a quarter turn the byte count is identical, so a mismatch here reshapes
+    # the pixels into noise instead of raising. Report display dimensions.
+    rotation = 0
+    for side_data in video.get("side_data_list", []):
+        try:
+            rotation = int(float(side_data.get("rotation", 0)))
+        except (TypeError, ValueError):
+            pass
+    if rotation % 180 == 90:
+        width, height = height, width
+
     fps_raw = video.get("avg_frame_rate") or video.get("r_frame_rate") or "30/1"
     if fps_raw in ("0/0", "0"):
         fps_raw = video.get("r_frame_rate") or "30/1"
