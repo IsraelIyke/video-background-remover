@@ -88,6 +88,55 @@ def physical_cores() -> int:
     return max(1, logical // 2)
 
 
+class SceneCutDetector:
+    """Spots a hard cut between shots, so the recurrent state can be dropped.
+
+    The same memory that makes RVM stable within a shot works against it across
+    one. At a cut the hidden state still describes the previous scene -- where
+    the subject was, what the background looked like -- and the network spends
+    the next second or so being confidently wrong about a frame that has nothing
+    to do with it. Since `WARMUP_FRAMES` is 24, that is roughly a second of
+    visibly bad matte after every cut, and it is invisible in testing on
+    single-shot footage, which is what most test footage is.
+
+    Detection runs on a small greyscale thumbnail. Comparing full frames would
+    fire on camera shake and on a hand sweeping past the lens; at 64 pixels a
+    side, motion within a shot averages away and only a wholesale change of
+    content clears the threshold. It also makes the check free next to matting.
+    """
+
+    THUMB = 64
+
+    def __init__(self, threshold: float = 0.25):
+        self.threshold = float(threshold)
+        self._previous: np.ndarray | None = None
+        self.cuts = 0
+
+    def _thumb(self, frame_rgb: np.ndarray) -> np.ndarray:
+        import cv2
+        grey = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
+        small = cv2.resize(grey, (self.THUMB, self.THUMB), interpolation=cv2.INTER_AREA)
+        return small.astype(np.float32) * np.float32(1.0 / 255.0)
+
+    def __call__(self, frame_rgb: np.ndarray) -> bool:
+        """True when this frame begins a new shot."""
+        if self.threshold <= 0:
+            return False
+        thumb = self._thumb(frame_rgb)
+        previous, self._previous = self._previous, thumb
+        # The first frame of a clip is a cut by definition, but the engine is
+        # already in a reset state there, so reporting one would be noise.
+        if previous is None:
+            return False
+        if float(np.abs(thumb - previous).mean()) < self.threshold:
+            return False
+        self.cuts += 1
+        return True
+
+    def reset(self) -> None:
+        self._previous = None
+
+
 class MattingEngine:
     """Wraps one ONNX Runtime session plus the recurrent state it carries."""
 

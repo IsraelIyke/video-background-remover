@@ -59,9 +59,15 @@ a note on transparency
   the matte through an MP4, use --format matte (black & white matte) or
   --format stacked (colour above, matte below).
 
-  WebM is listed but ffmpeg 8 dropped VP9's alpha side-channel: it accepts the
-  request and silently returns opaque video. The tool probes your ffmpeg before
-  a transparent run and refuses rather than let you find out afterwards.
+  WebM (VP9) carries alpha too, and is far smaller than ProRes -- roughly 35x on
+  this project's clip. Note that reading one back needs the decoder named
+  explicitly, because ffmpeg's native vp9 decoder does not surface the alpha:
+      ffmpeg -c:v libvpx-vp9 -i out.webm -vf alphaextract -frames:v 1 a.png
+  Browsers handle it correctly on their own; Premiere and Resolve are unreliable
+  with it, so use --format mov for an editor.
+
+  The tool still probes your ffmpeg before a transparent run and refuses if the
+  encoder really cannot keep alpha, rather than let you find out afterwards.
 """,
     )
 
@@ -119,7 +125,15 @@ a note on transparency
                        help="Median-filter the matte to remove speckle.")
     matte.add_argument("--temporal", type=float, default=0.0,
                        help="Blend the matte with the previous frame (0-0.9) to "
-                            "settle a crawling edge.")
+                            "settle a crawling edge. The blend is per-pixel and "
+                            "backs off where the matte is moving, so it settles a "
+                            "static edge without dragging a moving one.")
+    matte.add_argument("--scene-cut", type=float, default=0.25, metavar="T",
+                       dest="scene_cut",
+                       help="Sensitivity for detecting a cut between shots (0 turns "
+                            "it off). At a cut the matting model's temporal memory "
+                            "still describes the previous shot, so it is cleared. "
+                            "Lower values detect softer transitions.")
     matte.add_argument("--main-subject", type=int, nargs="?", const=1, default=0,
                        metavar="N", dest="main_subject",
                        help="Keep only the N largest subjects (default 1). Drops "
@@ -288,9 +302,10 @@ def main() -> int:
         eprint("       --background for a colour / image / video / blur behind the subject.")
         return 1
 
-    # mov (ProRes 4444) is the transparent default because it is the one alpha
-    # container that has stayed reliable across ffmpeg releases -- FFmpeg 8
-    # dropped WebM's alpha side-channel -- and it is what editors want anyway.
+    # mov (ProRes 4444) stays the transparent default because it is what editors
+    # want and needs no special decoder to read back. webm keeps alpha here too
+    # and is ~35x smaller, so it is worth asking for explicitly when the target
+    # is a browser rather than an NLE.
     if args.fmt is None:
         args.fmt = "mov" if args.transparent else "mp4"
     fmt = formats.FORMATS[args.fmt]
@@ -327,7 +342,6 @@ def main() -> int:
                        formats.FORMATS[name].is_sequence)]
         if working:
             eprint(f"       Formats that do keep alpha here: {' / '.join(working)}")
-        eprint("       (ffmpeg 8 removed WebM alpha; mov/mkv/png are unaffected.)")
         return 1
 
     try:
@@ -415,6 +429,7 @@ def main() -> int:
         choke=args.choke, feather=args.feather, gamma=args.gamma,
         levels_low=levels_low, levels_high=levels_high, denoise=args.denoise,
         temporal=args.temporal, main_subject=args.main_subject,
+        scene_cut=args.scene_cut,
         start_frame=start_frame, end_frame=end_frame,
         include_audio=not args.no_audio, audio_codec=info.audio_codec,
     )

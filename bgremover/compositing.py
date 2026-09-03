@@ -144,6 +144,27 @@ def refine_alpha(alpha: np.ndarray, *, choke: float = 0.0, feather: float = 0.0,
     return np.clip(out, 0.0, 1.0, out=out)
 
 
+# Nothing here consults the source frame when deciding alpha, which looks like
+# an omission: the obvious next move is a guided filter over the matte with the
+# frame as guide, to snap a soft silhouette onto the hard edge beneath it. It
+# was implemented and measured, and it is worse -- monotonically so, on both
+# test clips, at every radius and epsilon tried:
+#
+#     Practice.mp4          contamination   edge width (px)
+#     as-is                     0.019            2.10
+#     guided r=1 eps=1e-6       0.042            2.29
+#     guided r=2 eps=1e-6       0.054            2.75
+#     guided r=4 eps=1e-6       0.075            3.97
+#
+# The premise was simply wrong. RVM's `downsample_ratio` input drives a Deep
+# Guided Filter inside the network: the upsample from backbone resolution to
+# full frame *is* a guided filter already, with coefficients learned end to end
+# rather than fitted over a box window. Adding a second one on top does not
+# sharpen an unrefined matte, it blurs a refined one. If the edge needs work,
+# raise the ratio (see SPEED_RATIOS in matting.py) so the learned filter has
+# more to work with -- do not post-process it here.
+
+
 # --------------------------------------------------------------------------- #
 # Foreground colour decontamination
 # --------------------------------------------------------------------------- #
@@ -257,14 +278,35 @@ def decontaminate(foreground: np.ndarray, alpha: np.ndarray, *,
 
 
 class TemporalSmoother:
-    """Optional exponential smoothing of the matte across frames.
+    """Optional smoothing of the matte across frames, applied per pixel.
 
     RVM is already temporally stable, so this stays off by default; it earns its
     keep on noisy or low-light footage where the edge still crawls a little.
+
+    The blend is motion-adaptive rather than a flat exponential average. A
+    uniform EMA cannot tell edge crawl from the subject actually moving, so it
+    smooths both: the flicker goes away and the silhouette drags a frame or two
+    behind an arm that swings. That lag is far more objectionable than the
+    shimmer it was meant to cure, which is why a flat version has to be kept at
+    a strength too low to accomplish much.
+
+    Weighting the blend by how much each pixel changed separates the two cases.
+    A pixel whose alpha barely moved is either interior or a static edge, and
+    smoothing it costs nothing; a pixel that swung hard is on a moving boundary,
+    where the new value is signal and the old one is stale. So the strength is
+    scaled down toward zero exactly where motion is, leaving still regions fully
+    smoothed and moving ones untouched.
     """
 
-    def __init__(self, strength: float = 0.0):
+    # How large an alpha change counts as motion rather than noise. Frame-to-
+    # frame flicker on the test clips sits at 0.08-0.20 in the edge band and
+    # essentially 0 in the interior, so the knee belongs above the noise floor
+    # and below a real edge sweep.
+    KNEE = 0.25
+
+    def __init__(self, strength: float = 0.0, knee: float = KNEE):
         self.strength = float(np.clip(strength, 0.0, 0.95))
+        self.knee = max(float(knee), 1e-3)
         self._previous: np.ndarray | None = None
 
     def __call__(self, alpha: np.ndarray) -> np.ndarray:
@@ -273,7 +315,13 @@ class TemporalSmoother:
         if self._previous is None or self._previous.shape != alpha.shape:
             self._previous = alpha.copy()
             return alpha
-        blended = self._previous * self.strength + alpha * (1.0 - self.strength)
+
+        delta = np.abs(alpha - self._previous)
+        local = np.clip(delta * (1.0 / self.knee), 0.0, 1.0)
+        local *= -self.strength
+        local += self.strength          # strength * (1 - clip(delta/knee))
+
+        blended = self._previous * local + alpha * (1.0 - local)
         self._previous = blended
         return blended
 

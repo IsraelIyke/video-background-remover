@@ -76,6 +76,7 @@ class Settings:
     denoise: bool = False
     temporal: float = 0.0
     main_subject: int = 0
+    scene_cut: float = 0.25   # 0 disables; see matting.SceneCutDetector
 
     # span
     start_frame: int = 0
@@ -92,7 +93,7 @@ def _frame_span_to_time(index: int, fps: Fraction) -> float:
 def process_span(settings: Settings, info: VideoInfo,
                  progress: "mp.Queue | None" = None) -> int:
     """Matte and encode frames [start_frame, end_frame). Returns frames written."""
-    from .matting import MattingEngine
+    from .matting import MattingEngine, SceneCutDetector
 
     fmt = formats.FORMATS[settings.fmt]
     width = settings.work_width or info.width
@@ -106,6 +107,7 @@ def process_span(settings: Settings, info: VideoInfo,
 
     background = compositing.build_background(settings.background, width, height)
     smoother = compositing.TemporalSmoother(settings.temporal)
+    scene_cut = SceneCutDetector(settings.scene_cut)
 
     # A background given for an alpha-capable format is honoured, and the frames
     # simply come out fully opaque. The reverse is not possible.
@@ -158,6 +160,14 @@ def process_span(settings: Settings, info: VideoInfo,
             if raw is None:
                 break
             frame = np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 3)
+
+            # Both kinds of memory describe the previous shot and neither
+            # survives a cut, so drop them before this frame is matted rather
+            # than after. A worker's run-up sees the same check, so a cut inside
+            # the warm-up is handled without the seam logic knowing about it.
+            if scene_cut(frame):
+                engine.reset()
+                smoother.reset()
 
             foreground, alpha = engine(frame, ratio)
 

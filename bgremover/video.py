@@ -375,12 +375,22 @@ def encoder_keeps_alpha(encoder_args: list[str], suffix: str,
                         is_sequence: bool = False) -> bool:
     """Encode two tiny frames carrying a known alpha ramp and see if it survives.
 
-    ffmpeg lists yuva420p among libvpx-vp9's pixel formats, but FFmpeg 8 dropped
-    the code that writes WebM's alpha side-channel, so the encode reports success
-    and quietly hands back opaque video. Nothing in the command line reveals
-    this. A full run here is measured in tens of minutes, so spending a third of
-    a second to find out first is a bargain -- and which codecs work varies by
-    build, which is why this asks the local ffmpeg rather than assuming.
+    A full run here is measured in tens of minutes, so spending a third of a
+    second to find out first is a bargain -- and which codecs carry alpha varies
+    by build, which is why this asks the local ffmpeg rather than assuming.
+
+    The read-back has to name the decoder. VP9 keeps alpha in a side-channel that
+    ffmpeg's *native* `vp9` decoder does not surface, so decoding without saying
+    which decoder to use hands back a solid 255 plane for a file whose alpha is
+    perfectly intact -- and this function then blamed the encoder for it. That
+    false negative is why WebM was believed to be broken and documented as such;
+    asking libvpx-vp9 explicitly shows alpha spanning 0..255. Verified against
+    real output:
+
+        ffmpeg -c:v libvpx-vp9 -i out.webm -vf alphaextract -frames:v 1 a.png
+
+    So each candidate decoder is tried and the format passes if any of them
+    recovers the ramp. A genuinely alpha-less encode fails all of them.
     """
     key = (tuple(encoder_args), suffix, is_sequence)
     if key in _ALPHA_SUPPORT:
@@ -408,17 +418,26 @@ def encoder_keeps_alpha(encoder_args: list[str], suffix: str,
         if encode.returncode != 0 or not tmp.exists():
             return _ALPHA_SUPPORT.setdefault(key, False)
 
-        decode = subprocess.run(
-            ["ffmpeg", "-v", "error", "-nostdin", "-i", str(tmp), "-vframes", "1",
-             "-f", "rawvideo", "-pix_fmt", "rgba", "-"],
-            capture_output=True, creationflags=_NO_WINDOW)
-        raw = decode.stdout
-        if len(raw) < width * height * 4:
-            return _ALPHA_SUPPORT.setdefault(key, False)
-        alpha = np.frombuffer(raw[:width * height * 4], np.uint8).reshape(height, width, 4)[..., 3]
-        # A codec that dropped alpha hands back a solid 255 plane.
-        survived = bool(alpha.min() < 16 and alpha.max() > 239 and len(np.unique(alpha)) > 8)
-        return _ALPHA_SUPPORT.setdefault(key, survived)
+        # The container's real decoder first, then whatever ffmpeg would pick.
+        decoders: list[list[str]] = [[]]
+        if suffix == ".webm":
+            decoders.insert(0, ["-c:v", "libvpx-vp9"])
+
+        for decoder in decoders:
+            decode = subprocess.run(
+                ["ffmpeg", "-v", "error", "-nostdin"] + decoder
+                + ["-i", str(tmp), "-frames:v", "1",
+                   "-f", "rawvideo", "-pix_fmt", "rgba", "-"],
+                capture_output=True, creationflags=_NO_WINDOW)
+            raw = decode.stdout
+            if len(raw) < width * height * 4:
+                continue
+            alpha = np.frombuffer(raw[:width * height * 4], np.uint8) \
+                      .reshape(height, width, 4)[..., 3]
+            # A codec that dropped alpha hands back a solid 255 plane.
+            if alpha.min() < 16 and alpha.max() > 239 and len(np.unique(alpha)) > 8:
+                return _ALPHA_SUPPORT.setdefault(key, True)
+        return _ALPHA_SUPPORT.setdefault(key, False)
     except (OSError, subprocess.SubprocessError):
         return _ALPHA_SUPPORT.setdefault(key, False)
     finally:

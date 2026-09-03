@@ -1,0 +1,598 @@
+===============================================================================
+ BACKGROUND REMOVER - COMMAND REFERENCE FOR BOTH TOOLS
+===============================================================================
+
+This project now contains TWO background removers. They share all the output,
+compositing and matte-refinement code, so the flags below behave identically
+in both. They differ only in where the matte comes from.
+
+  TOOL A   bgremove.py    Computes a matte with Robust Video Matting (RVM)
+                          via ONNX Runtime. Works on any video. Slow on CPU.
+
+  TOOL B   bgcapcut.py    Reuses a matte CapCut already computed and cached
+                          on disk. Only works for clips you cut out in CapCut.
+                          No model, no inference.
+
+Neither uploads anything. Everything runs locally.
+
+Contents
+  1.  ONE-TIME SETUP
+  2.  QUICK START - both tools
+  3.  TRANSPARENCY  (read this - you do NOT need chroma key)
+  4.  TOOL A - bgremove.py, full command list
+  5.  TOOL B - bgcapcut.py, full command list
+  6.  WHICH TOOL SHOULD I USE?
+  7.  YOUR CURRENT SITUATION - the 0809 masks are orphaned
+  8.  SPEED - and the one thing that matters most
+  9.  VERIFYING A TRANSPARENT FILE
+  10. TROUBLESHOOTING
+  11. HOW TOOL B WORKS (the CapCut cache format)
+
+
+===============================================================================
+ 1. ONE-TIME SETUP
+===============================================================================
+
+Open a terminal in this folder:
+
+    cd C:\Users\nwang\Desktop\Background-remover
+
+Install the Python dependencies (both tools share them):
+
+    pip install -r requirements.txt
+
+Install ffmpeg. It is NOT a pip package and both tools require it:
+
+    winget install Gyan.FFmpeg
+
+IMPORTANT: after installing ffmpeg, close the terminal and open a NEW one, or
+PATH will not be refreshed and both tools will report "ffmpeg not found".
+
+Check it worked:
+
+    python bgremove.py --version
+    python bgcapcut.py --version
+    ffmpeg -version
+
+Tool A downloads its 14 MB matting model on first run and caches it in
+models\. Tool B downloads nothing.
+
+
+===============================================================================
+ 2. QUICK START - BOTH TOOLS
+===============================================================================
+
+--- TOOL A: bgremove.py (works on any video) ---
+
+    python bgremove.py Practice.mp4
+
+Writes Practice_nobg.mp4 - subject on black, audio kept.
+
+    python bgremove.py Practice.mp4 --transparent
+
+Writes Practice_nobg.mov - ProRes 4444, real alpha channel.
+
+Always try a short sample before committing to a long run:
+
+    python bgremove.py Practice.mp4 --preview 10 --transparent
+
+
+--- TOOL B: bgcapcut.py (only for clips cut out in CapCut) ---
+
+Step 1 - see what CapCut has cached:
+
+    python bgcapcut.py --list-drafts
+
+Step 2 - inspect one before rendering:
+
+    python bgcapcut.py 0809 --info
+
+Step 3 - render it:
+
+    python bgcapcut.py 0809 --transparent
+
+If the draft's timeline has been emptied, see section 7.
+
+
+===============================================================================
+ 3. TRANSPARENCY - YOU DO NOT NEED CHROMA KEY
+===============================================================================
+
+You never have to green-screen-and-key unless you want to. Both tools produce
+a real alpha channel with:
+
+    --transparent          (or -t, or --no-bg)
+
+The only catch is the container. MP4 CANNOT store transparency - that is a
+limitation of the format, not of these tools. H.264 has no usable alpha
+channel, and Apple's HEVC-with-alpha cannot be encoded by ffmpeg at all.
+
+So --transparent picks a container that can hold alpha. Your options:
+
+  FORMAT   CODEC          SIZE for 15.8s @1080x1920   USE FOR
+  ------   ------------   -------------------------   ----------------------
+  webm     VP9 + alpha    ~21 MB                      browsers, web, small
+  mov      ProRes 4444    ~650 MB  (default)          Premiere, Resolve, FCP
+  mkv      FFV1 lossless  ~300 MB                     archiving
+  png      RGBA frames    ~large                      imports into anything
+
+Commands:
+
+    python bgcapcut.py 0809 --transparent                  # mov, the default
+    python bgcapcut.py 0809 --transparent --format webm    # ~30x smaller
+    python bgcapcut.py 0809 --transparent --format mkv
+    python bgcapcut.py 0809 --transparent --format png
+
+    python bgremove.py IMG_6377.MOV --transparent
+    python bgremove.py IMG_6377.MOV --transparent --format mkv
+
+
+*** WEBM ALPHA - FIXED, AND WHAT IT WAS ***
+
+WebM alpha works in BOTH tools. Verified end to end: files written by each
+decode with alpha spanning the full 0..255 range.
+
+bgremove.py used to refuse --format webm, reporting that the encoder dropped
+alpha. That was a false alarm caused by our own probe:
+
+  bgremover\video.py::encoder_keeps_alpha writes a test file with a known alpha
+  ramp, then decodes it back to check the ramp survived. It decoded WITHOUT
+  naming a decoder, so ffmpeg picked its NATIVE "vp9" decoder - and that decoder
+  does not surface VP9's alpha side-channel. The probe read a solid 255 plane off
+  a file whose alpha was perfectly intact, and blamed the encoder.
+
+FIXED: the probe now tries the container's real decoder ("-c:v libvpx-vp9") and
+passes if any decoder recovers the ramp. Both tools share that one
+implementation - bgremover\capcut.py re-exports it rather than keeping a second
+copy. Check the current state yourself:
+
+    python -c "from bgremover import formats, video, capcut; a=formats.FORMATS['webm'].encoder_args(18,False); print('shared:', video.encoder_keeps_alpha is capcut.encoder_keeps_alpha); print('webm keeps alpha:', video.encoder_keeps_alpha(a,'.webm'))"
+
+    -> shared: True
+    -> webm keeps alpha: True
+
+Measured after the fix, Practice.mp4 (640x360):
+
+    python bgremove.py Practice.mp4 --transparent --format webm
+    -> 0.21 MB for a 30-frame preview; ~46 MB extrapolated for the full clip,
+       against ~1.6 GB for ProRes 4444. About 35x smaller, with real alpha.
+
+THE ONE REMAINING SHARP EDGE: reading a WebM back needs the decoder named. Plain
+ffprobe reports "yuv420p" and looks alpha-less. That is the display quirk, not
+the file. See section 9.
+
+Files changed by this fix:
+    bgremover\video.py    the probe, and its docstring
+    bgremove.py           the --help note, the mov-default comment, one error line
+    USAGE.md              the "WebM alpha is broken" section, marked as corrected
+    README.md             untouched - it described this correctly all along
+
+
+--- If you DO want a background instead of transparency ---
+
+    -b, --background SPEC       works identically in both tools
+
+    greenscreen     studio chroma (0,177,64) - keys cleaner than pure green
+    bluescreen      studio chroma (0,71,187)
+    black white grey red green blue cyan magenta yellow
+    #101820  #abc   hex
+    12,34,56        r,g,b
+    office.jpg      image, scaled and centre-cropped to fill
+    loop.mp4        video, looped as long as the input runs
+    blur  blur:25   the real background, defocused
+    none            transparency (alpha formats only)
+
+    python bgcapcut.py 0809 --background "#101820"
+    python bgcapcut.py 0809 --background office.jpg
+    python bgcapcut.py 0809 --background blur:25
+    python bgremove.py Practice.mp4 --background greenscreen --crf 14
+
+Carrying a matte through an MP4 (for luma keys, shaders, Unity, canvas):
+
+    --format matte      black-and-white matte on its own
+    --format stacked    colour on top, matte below
+
+
+===============================================================================
+ 4. TOOL A - bgremove.py, FULL COMMAND LIST
+===============================================================================
+
+    python bgremove.py <input> [options]
+
+INPUT / OUTPUT
+    input                     video file to process
+    -o, --output PATH         default: <input>_nobg.<ext>
+    -f, --format FORMAT       mp4 (default) webm mov mkv png matte stacked
+    -b, --background SPEC     colour / image / video / blur[:n] / none
+    -t, --transparent         real alpha channel; selects mov
+
+QUALITY AND SPEED
+    --speed {fast,balanced,best,max}
+                              what the network sees: 0.25/0.375/0.5/1.0
+                              THIS is what sets edge quality, not --resolution
+    --resolution N            cap working size to N px on the short edge
+                              (default 1080); 'source' keeps the input's own
+    --model {mobilenetv3,resnet50}
+                              resnet50 is 3-6x slower, rarely worth it on CPU
+    --downsample FLOAT        override the matting scale directly (0-1)
+    --crf INT                 encoder quality, lower is better (default 18)
+    --hwenc                   encode H.264 on the GPU
+
+MATTE REFINEMENT
+    --no-decontaminate        keep the network's background-tinted edge colours
+    --main-subject [N]        keep only the N largest people (default 1)
+    --choke PIXELS            shrink (-) or grow (+) the cutout
+    --feather PIXELS          soften the edge
+    --alpha-gamma F           <1 firms up semi-transparent areas
+    --levels LOW,HIGH         remap the matte, e.g. 0.05,0.95
+    --denoise                 median-filter out speckle
+    --temporal F              blend with previous frame (0-0.9)
+    --scene-cut T             cut detection sensitivity (default 0.25, 0=off)
+
+WHAT TO PROCESS
+    --start SECONDS           start time
+    --duration SECONDS        how much to process
+    --preview [SECONDS]       short sample, default 10s
+    --no-audio                drop the audio track
+
+PERFORMANCE / OTHER
+    -j, --workers N           parallel processes (1 on this 2-core machine)
+    --threads N               threads per worker
+    --benchmark               time this machine and exit
+    --list-formats            show output formats and exit
+    --quiet                   no progress bar
+    --version
+
+RECIPES
+    # measure this machine first
+    python bgremove.py Practice.mp4 --benchmark
+
+    # transparent, best edge, only the presenter
+    python bgremove.py Practice.mp4 --transparent --speed best --main-subject
+
+    # lossless alpha at half the size of ProRes
+    python bgremove.py Practice.mp4 --transparent --format mkv
+
+    # 4K source kept at 4K (slow, and no better an edge)
+    python bgremove.py IMG_6377.MOV --transparent --resolution source
+
+    # check one tricky moment before rendering everything
+    python bgremove.py Practice.mp4 --start 76 --duration 3 --transparent -o check.mov
+
+
+===============================================================================
+ 5. TOOL B - bgcapcut.py, FULL COMMAND LIST
+===============================================================================
+
+    python bgcapcut.py <draft> [options]
+    python bgcapcut.py --masks <dir> --video <file> [options]
+
+FINDING WORK
+    --list-drafts             list every cached cutout on disk, and exit
+    --info                    describe a draft's clips and masks, and exit
+    <draft>                   draft name (e.g. 0809) or path to a draft folder
+    --segment N               which cut-out clip to render (default 0)
+    --draft-root PATH         where CapCut keeps drafts, if not the default
+    --masks DIR               use a matting directory directly
+    --video FILE              the source video (required with --masks)
+
+OUTPUT                        (identical to Tool A)
+    -o, --output PATH         default: <source>_capcut_nobg.<ext>
+    -f, --format FORMAT       mp4 (default) webm mov mkv png matte stacked
+    -b, --background SPEC     colour / image / video / blur[:n] / none
+    -t, --transparent         real alpha channel; selects mov
+    --crf INT                 encoder quality (default 18)
+    --hwenc                   encode H.264 on the GPU
+
+MASK HANDLING                 (specific to this tool)
+    --upsample {guided,bicubic}
+                              how to get from CapCut's 256x448 mask to a full
+                              frame. 'guided' (default) snaps the edge onto real
+                              image edges - measured soft-edge area 0.444%
+                              against bicubic's 1.046%. 'bicubic' reproduces
+                              CapCut's own softer edge.
+    --tighten F               edge contrast restored after the guided filter
+                              (default 1.6). Higher is crisper but erodes the
+                              silhouette - 2.2 visibly thinned shoulders.
+    --resolution N            cap working size to N px on the short edge
+                              (default 1080); 'source' keeps the input's own
+
+MATTE REFINEMENT              (identical to Tool A, except the two noted)
+    --no-decontaminate        keep the original background-tinted edge colours
+    --choke PIXELS            defaults to the DRAFT's own 'expansion' value
+    --feather PIXELS          defaults to the DRAFT's own 'feather' value
+    --alpha-gamma F
+    --levels LOW,HIGH
+    --denoise
+    --temporal F              rarely needed; CapCut's masks are already stable
+    --main-subject [N]
+
+WHAT TO PROCESS
+    --start SECONDS           defaults to the draft's own trim point
+    --duration SECONDS        defaults to the draft's trim length
+    --full-source             ignore the trim; process all the masks cover
+    --preview [SECONDS]       short sample, default 10s
+    --no-audio
+
+OTHER
+    --quiet
+    --version
+
+RECIPES
+    # what is available
+    python bgcapcut.py --list-drafts
+    python bgcapcut.py 0809 --info
+
+    # the draft's own trim, transparent, small file
+    python bgcapcut.py 0809 --transparent --format webm
+
+    # for an editor
+    python bgcapcut.py 0809 --transparent --format mov
+
+    # match CapCut's own softer edge exactly
+    python bgcapcut.py 0809 --upsample bicubic
+
+    # everything the masks cover, not just the trimmed part
+    python bgcapcut.py 0809 --full-source --transparent --format webm
+
+    # a specific moment
+    python bgcapcut.py 0809 --start 20 --duration 3 --transparent --format webm
+
+    # bypass draft lookup entirely
+    python bgcapcut.py --masks "C:\Users\nwang\AppData\Local\CapCut\User Data\Projects\com.lveditor.draft\0809\matting\0a58ba4109e0a9519fe53c6169e4044c\2" --video "C:\Users\nwang\Downloads\ShareOps\Video\IMG_6377.MOV" --transparent --format webm
+
+
+===============================================================================
+ 6. WHICH TOOL SHOULD I USE?
+===============================================================================
+
+USE TOOL B (bgcapcut.py) WHEN
+  - the clip was already cut out in CapCut, and
+  - you want that same cutout out as a file, and
+  - you can live with CapCut's mask resolution.
+
+  The matte already exists, so the expensive step is free.
+
+USE TOOL A (bgremove.py) WHEN
+  - the clip was never in CapCut, or
+  - CapCut has no cached cutout for it, or
+  - you need the best possible edge.
+
+THE QUALITY TRADE-OFF, MEASURED
+
+CapCut caches its masks at 256x448. On a 1080x1920 frame that is a 4.22x
+upscale, so fine detail is not merely blurred - it was never sampled. On the
+test footage (short twists against a light wall), every individual strand is a
+smooth blob in CapCut's mask, while RVM at full resolution resolves them.
+
+  Soft-edge area on the same frame (proportion of pixels with partial alpha):
+
+    CapCut mask -> bicubic upsample      1.046%
+    CapCut mask -> guided upsample       0.444%   (tighter, on real edges)
+    RVM at 1080x1920                     1.514%   (genuine hair transparency)
+
+Guided upsampling is a real improvement over bicubic, but it cannot invent
+detail. If the edge matters, use Tool A.
+
+WHAT TOOL B DOES *BETTER*, besides speed
+  - Temporal stability. CapCut's masks come from a video model, so they do not
+    shimmer. Tool A's RVM is also stable; per-frame segmentation models are not.
+  - It reproduces what CapCut itself showed you, which matters if the point is
+    to match a CapCut edit rather than to get the best cutout.
+
+
+===============================================================================
+ 7. YOUR CURRENT SITUATION - THE 0809 MASKS ARE ORPHANED
+===============================================================================
+
+As of the last check, draft 0809 is in this state:
+
+  - 866 cached masks are still on disk (95 MB), fully usable
+  - but draft_content.json has been rewritten with "videos: []" and
+    "tracks: []" - the timeline was emptied in CapCut
+  - draft_meta_info.json no longer lists the source media either
+
+CapCut clears the timeline reference when a project is cleared or re-cut, but
+it does NOT delete the mask cache. So the masks survive and the source path
+does not.
+
+--list-drafts flags this as ORPHAN and recovers what it can from CapCut's
+import cache (the matting folder is named after the media hash, and the import
+cache is keyed the same way):
+
+    0809   866 masks   ORPHAN   2160x3840 @ 24.00fps  108.0s  430 MB
+
+That is IMG_6377.MOV. To render it, supply the source yourself:
+
+    python bgcapcut.py 0809 --video "C:\Users\nwang\Downloads\ShareOps\Video\IMG_6377.MOV" --transparent --format webm
+
+Because the trim is gone with the timeline, this defaults to the full range the
+masks cover (12.665s - 48.705s of the source, ~36s) rather than the original
+15.8s trim. Use --start / --duration to narrow it:
+
+    python bgcapcut.py 0809 --video "...\IMG_6377.MOV" --start 15.667 --duration 15.8 --transparent --format webm
+
+TO AVOID THIS IN FUTURE: keep the CapCut project intact until you have
+exported, or note the trim points before clearing the timeline.
+
+
+===============================================================================
+ 8. SPEED - AND THE ONE THING THAT MATTERS MOST
+===============================================================================
+
+*** CLOSE CAPCUT AND FIREFOX BEFORE ANY LONG RUN. ***
+
+This is a 2-core Intel i5-5200U with no usable GPU. It is the single largest
+speed factor here - larger than any flag in either tool.
+
+While measuring Tool B, CapCut was open with 6 processes holding 1.1 GB, plus
+Firefox, and the CPU sat at 65% BEFORE the job started. USAGE.md documents the
+same effect for Tool A: 4.4 fps idle against 0.6 fps with applications open.
+
+Because of that, the Tool B figures measured so far (4.5-6 s/frame end to end
+on a 4K source) are a FLOOR, not a benchmark. Measure on an idle machine.
+
+What actually costs time in Tool B, now that matting is free:
+  - decoding 4K HEVC (the source is 3840x2160; this dominates)
+  - colour decontamination (the pyramid fill, ~0.3s/frame at 1080p)
+  - encoding
+
+Ways to speed Tool B up:
+    --no-decontaminate        skips the halo fix; fastest single win
+    --upsample bicubic        slightly cheaper than guided
+    --resolution 720          fewer pixels everywhere
+    --preview 5               do not render 36s to check a setting
+
+For Tool A, measure your machine first:
+
+    python bgremove.py Practice.mp4 --benchmark
+
+
+===============================================================================
+ 9. VERIFYING A TRANSPARENT FILE
+===============================================================================
+
+ffprobe will report a WebM's pixel format as "yuv420p" and look like it has no
+alpha. That is the native decoder not surfacing the alpha side-channel. Do not
+trust it. Check properly:
+
+    ffmpeg -c:v libvpx-vp9 -i out.webm -vf alphaextract -frames:v 1 matte.png
+
+Open matte.png. A real matte is a white subject on black. If it is entirely
+white, the alpha was lost.
+
+Numerically:
+
+    ffmpeg -c:v libvpx-vp9 -i out.webm -vf alphaextract -frames:v 1 -f rawvideo -pix_fmt gray - | python -c "import sys,numpy as np;a=np.frombuffer(sys.stdin.buffer.read(),np.uint8);print('alpha %d..%d'%(a.min(),a.max()))"
+
+    alpha 0..255   -> real transparency
+    alpha 255..255 -> opaque, alpha was dropped
+
+For ProRes (.mov) and FFV1 (.mkv) no special decoder is needed:
+
+    ffmpeg -i out.mov -vf alphaextract -frames:v 1 matte.png
+
+ANYTHING CONSUMING A WEBM FROM THIS PROJECT needs the explicit
+"-c:v libvpx-vp9". Browsers get it right on their own. Premiere and Resolve are
+unreliable with VP9 alpha - use --format mov for them.
+
+
+===============================================================================
+ 10. TROUBLESHOOTING
+===============================================================================
+
+"ffmpeg not found"
+    winget install Gyan.FFmpeg, then open a NEW terminal so PATH refreshes.
+
+"No cached CapCut cutouts found"  (Tool B)
+    Nothing has been cut out in CapCut yet, or the drafts live somewhere else.
+    Apply 'Remove background' to a clip, let it finish, then retry. Point at a
+    different location with --draft-root if needed.
+
+"no clip in draft X has a cached cutout"  (Tool B)
+    Either the cutout was never made, or the timeline was emptied. If masks are
+    still on disk the tool says so and tells you to pass --video. See section 7.
+
+"the draft's source video is missing"  (Tool B)
+    CapCut stores the source as an ABSOLUTE path, so moving or renaming the
+    media breaks the link - and a copied draft folder is never self-contained.
+    Pass --masks and --video directly.
+
+"draft_content.json is not valid JSON"  (Tool B)
+    CapCut was probably mid-save. Close the project and retry.
+
+The cutout looks right but is offset or stretched  (Tool B)
+    The mask is stretched to the full frame, which is correct for the drafts
+    measured. If a future CapCut version pads instead, edges will sit a few
+    pixels off. Compare --upsample bicubic against --upsample guided; if both
+    are wrong the geometry assumption changed.
+
+The output has no transparency
+    If you asked for mp4, that is expected - MP4 cannot carry alpha. If you asked
+    for webm and it LOOKS opaque, it probably is not: ffmpeg's native vp9 decoder
+    hides the alpha. Check it properly with section 9's command before concluding
+    anything was lost.
+
+"moov atom not found"
+    A truncated MP4 from a killed run. It cannot be repaired; run again. Both
+    tools now encode to <name>.part.<ext> and only move it into place after a
+    clean exit, so the real output is never a corpse.
+
+I had to stop a long run
+    Press Ctrl+C once and wait. Both tools finalise what is done into
+    <name>_partial.<ext>, which plays normally. Runs do not resume.
+
+It is slow
+    Section 8. Close CapCut and Firefox first.
+
+The matte is poor  (Tool A)
+    RVM is trained on people; it will not segment objects or pets well. Try
+    --speed best. For overlapping or inset people, --main-subject.
+
+Speckle, or a second person appearing
+    --main-subject   (also removes disconnected speckle as a side effect)
+
+
+===============================================================================
+ 11. HOW TOOL B WORKS (THE CAPCUT CACHE FORMAT)
+===============================================================================
+
+Decoded from a CapCut 7.1.0 draft on Windows. Kept here because it is not
+documented anywhere and took real work to establish.
+
+LOCATION
+  %LOCALAPPDATA%\CapCut\User Data\Projects\com.lveditor.draft\<draft>\
+      draft_content.json           the live timeline
+      draft_meta_info.json         media list, absolute paths
+      matting\<media-hash>\<level>\
+          mask\<microsecond-ts>    raw headerless 8-bit single-channel alpha
+          maskinfo\<same-ts>       JSON; boundingBox gives width/height
+          matting_result.json      the time range covered, in microseconds
+          mocf                     small binary, purpose unidentified
+
+MASK FORMAT
+  256 x 448 x 1 byte = 114,688 bytes, matching every mask file exactly and
+  matching what maskinfo reports. Read with:
+
+      ffmpeg -f rawvideo -pix_fmt gray -s 256x448 -i <maskfile> out.png
+
+TIMING
+  Filenames are SOURCE-MEDIA timestamps in microseconds, spaced 41,666.67 us
+  apart = 24 fps, which is the source's own rate. Masks are looked up by source
+  time, not by index, so this stays correct when the timeline fps and the media
+  fps disagree - the measured draft was a 24 fps source on a 30 fps timeline.
+  Sort numerically, never lexically.
+
+GEOMETRY
+  A DIRECT STRETCH to the full frame - not aspect-fit with padding - even though
+  256/448 = 0.5714 does not match the 9:16 source's 0.5625. Established by
+  scoring mean frame-gradient magnitude along the alpha boundary for both
+  hypotheses: 0.356 for a stretch, 0.293 for 2px of side padding.
+
+WHY A GUIDED FILTER HERE, WHEN compositing.py ARGUES AGAINST ONE
+  bgremover\compositing.py (~line 147) documents that guided-filtering a matte
+  measured strictly worse, and that is correct - for RVM's matte. RVM takes a
+  downsample_ratio and runs a learned Deep Guided Filter internally to get from
+  backbone resolution to full frame, so its output has ALREADY been
+  guided-upsampled with coefficients trained end to end. A second box-window
+  filter on top blurs a refined matte.
+
+  CapCut's masks are the opposite case: raw, with no refinement of any kind,
+  needing a 4.22x upscale. There is no learned filter to duplicate, and the
+  guide does work nothing else has done. Hence --upsample guided is the default
+  in Tool B and no guided filter is used in Tool A.
+
+CAVEAT
+  draft_content.json reflects only the LAST SAVE. CapCut holds unsaved edits in
+  memory, so a cutout applied seconds ago may not be on disk yet. Save in
+  CapCut before running Tool B.
+
+FILES ADDED FOR TOOL B
+  bgcapcut.py                 the CLI
+  bgremover\capcut.py         draft parsing, mask decoding, guided upsample,
+                              orphan-cache discovery, corrected alpha probe
+  COMMANDS.txt                this file
+
+  Nothing in the existing tool was modified.
+
+===============================================================================

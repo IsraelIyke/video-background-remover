@@ -185,6 +185,7 @@ The raw matte is usually good as-is. When it isn't:
 --alpha-gamma 0.8   # firm up semi-transparent areas
 --denoise           # remove speckle
 --temporal 0.5      # blend with the previous frame if the edge crawls
+--scene-cut 0       # stop clearing the model's memory at cuts between shots
 ```
 
 A hard, cut-out look usually wants `--feather 1`.
@@ -235,6 +236,7 @@ quality and speed
 matte refinement
   --no-decontaminate        keep the network's own (background-tinted) edge colours
   --choke, --feather, --alpha-gamma, --levels, --denoise, --temporal
+  --scene-cut T             sensitivity for detecting cuts between shots (0 = off)
 
 what to process
   --start SECONDS           start time

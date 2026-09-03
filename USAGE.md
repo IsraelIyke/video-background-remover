@@ -78,41 +78,62 @@ error: --transparent and --background ask for opposite things.
 **MP4 cannot store alpha.** That is the container, not this tool. Apple ships
 HEVC-with-alpha in MP4; ffmpeg cannot encode it and little outside Apple plays it.
 
-More surprising: **WebM alpha is broken in ffmpeg 8.** `libvpx-vp9` still lists
-`yuva420p` among its pixel formats, accepts the request, exits 0 — and hands
-back opaque video. VP8 fails the same way. Nothing in the command line reveals
-it. Probed on this build:
+Everything else that claims to carry alpha here does. Probed on this build:
 
 | `--format` | codec | alpha | full-clip size |
 |---|---|---|---|
+| `webm` | VP9 | **works** | ~46 MB |
 | `mov` | ProRes 4444 | **works** | ~1.6 GB |
 | `mkv` | FFV1 | **works** | ~0.7 GB |
 | `png` | PNG sequence | **works** | ~1.3 GB |
-| `webm` | VP9 | **silently dropped** | — |
 | `mp4` | H.264 | not possible | 33 MB |
 
-Because a full run costs ~25 minutes, the tool now **probes your ffmpeg** before
-starting a transparent render — it encodes two tiny frames carrying a known
-alpha ramp and checks the ramp survives. If it doesn't, you get an error in one
-second instead of a wrong file in half an hour:
+> **Corrected.** This section previously stated that ffmpeg 8 had dropped VP9's
+> alpha side-channel and that `webm` silently returned opaque video, and the tool
+> refused the format on that basis. That was wrong, and the cause was our own
+> probe. `encoder_keeps_alpha` encodes a known alpha ramp and decodes it back to
+> check it survived — but it decoded **without naming a decoder**, so ffmpeg chose
+> its native `vp9` decoder, which does not surface VP9's alpha side-channel. The
+> probe read a solid 255 plane off a file whose alpha was perfectly intact and
+> blamed the encoder. It now names the container's real decoder, `webm` passes,
+> and files written with it decode with alpha spanning 0..255. (README.md had it
+> right all along.) The webm size above is extrapolated from a 30-frame sample at
+> 0.21 MB, not a full run.
+
+Because a full run costs ~25 minutes, the tool still **probes your ffmpeg** before
+starting a transparent render, so an encoder that genuinely cannot keep alpha
+fails in one second instead of producing a wrong file in half an hour:
 
 ```
-$ python bgremove.py Practice.mp4 --transparent --format webm
-error: this ffmpeg build encodes webm without an alpha channel.
-       It accepts the request and silently returns opaque video, so the
-       run would look fine and the transparency would simply be missing.
-       Formats that do keep alpha here: mov / mkv / png
+$ python bgremove.py Practice.mp4 --transparent --format mp4
+error: --transparent needs a format that can store alpha, and mp4 cannot.
 ```
 
-The probe asks your local ffmpeg rather than assuming, so a build with working
-VP9 alpha will be allowed through.
+**Reading a WebM back needs the decoder named.** This is the one sharp edge:
 
-### Alpha costs ~50× the file size
+```bash
+ffmpeg -c:v libvpx-vp9 -i out.webm -vf alphaextract -frames:v 1 matte.png
+```
 
-Real alpha means effectively lossless, and 640×360 ProRes 4444 runs ~1.6 GB for
-this clip against 33 MB for green-screen MP4. If size matters more than a
-perfect edge, green + key is the pragmatic choice at this resolution. The run
-summary prints an estimate before starting.
+Plain `ffprobe` will report `yuv420p` and look alpha-less; that is the display
+quirk, not the file. Browsers read WebM alpha correctly on their own. Premiere
+and Resolve are unreliable with VP9 alpha — use `--format mov` for an editor.
+
+### Lossless alpha costs ~50× the file size — but alpha itself need not
+
+ProRes 4444, FFV1 and PNG are all effectively lossless, and 640×360 ProRes 4444
+runs ~1.6 GB for this clip against 33 MB for green-screen MP4. The run summary
+prints an estimate before starting.
+
+`webm` is the way out of that trade-off: it is *lossy* but keeps a real alpha
+channel, at ~46 MB for this clip — the same order as the green-screen MP4, with
+no keying and no chroma spill. Reach for green + key only when the target cannot
+read WebM alpha at all.
+
+```bash
+python bgremove.py Practice.mp4 --transparent --format webm   # small, real alpha
+python bgremove.py Practice.mp4 --transparent                 # mov, for an editor
+```
 
 ### Carrying a matte through an MP4
 
@@ -193,6 +214,22 @@ need the pixels, and budget for it: 4K ProRes 4444 is ~22 GB per two minutes.
 | `--levels LOW,HIGH` | — | remap the matte, e.g. `0.05,0.95` to clear haze |
 | `--denoise` | off | median-filter the matte to remove speckle |
 | `--temporal` | `0` | blend with the previous frame (0–0.9) to settle a crawling edge |
+| `--scene-cut T` | `0.25` | sensitivity for detecting a cut between shots; `0` turns it off |
+
+### Cuts between shots
+
+The matting model carries a memory of the previous frame, which is what keeps
+edges from shimmering. At a cut that memory describes the wrong shot, so it is
+cleared whenever the frame changes wholesale. Detection runs on a 64-pixel
+thumbnail, which is why camera shake and a hand crossing the lens do not trigger
+it: on the two test clips here it found all eight real cuts in `Practice.mp4`
+and fired zero times on the single-shot footage.
+
+Leave it alone unless it misbehaves. Lower the threshold if a soft transition is
+being missed; raise it, or pass `--scene-cut 0`, if a shot with violent motion
+is being cut up. The measured benefit is real but modest — the model recovers
+from a stale state within about two frames — so this is a correctness fix rather
+than a visible quality upgrade.
 
 ### What to process
 
@@ -311,8 +348,12 @@ only when the encoder shuts down cleanly, so a killed run leaves frames with
 nothing describing them. Those bytes cannot be repaired; run the job again.
 Current versions cannot produce this at the output path (see above).
 
-**The output has no transparency** — you probably asked for `webm`. See
-"Transparency: what actually works here". The tool now refuses this up front.
+**The output has no transparency** — if you asked for `mp4`, that is expected;
+MP4 cannot carry alpha. If you asked for `webm` and it *looks* opaque, check it
+with the decoder named — `ffmpeg -c:v libvpx-vp9 -i out.webm -vf alphaextract
+-frames:v 1 matte.png` — because the native decoder hides the alpha. A white
+matte means it really was lost; a silhouette means it is fine. See
+"Transparency: what actually works here".
 
 **A second person keeps appearing** — RVM segments all people, including ones
 inside insets and posters. Use `--main-subject`.
@@ -323,7 +364,18 @@ pets, or several overlapping subjects well. Try `--speed best`.
 **Speckle in empty areas** — `--denoise --levels 0.06,0.97`, or `--main-subject`,
 which removes disconnected specks as a side effect.
 
-**Edges crawl between frames** — `--temporal 0.3`.
+**Edges crawl between frames** — `--temporal 0.3`, raising it if needed. The
+blend is per-pixel and eases off wherever the matte is moving, so it settles a
+static edge without dragging a moving one behind the subject.
+
+Expect a modest improvement rather than a cure. Measured on the test clips,
+smoothing buys stability roughly in proportion to the accuracy it gives up, and
+the model's matte is already stable enough that there is little left to win:
+frame-to-frame change deep inside the subject is already zero, and most of what
+remains at the edge is the subject genuinely moving. That is why this is off by
+default.
+
+**A shot right after a cut looks wrong** — see `--scene-cut` above.
 
 **It's slow** — close other applications first; see "Speed" above.
 
