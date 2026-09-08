@@ -45,9 +45,23 @@ can delete it.
 ## Installing
 
 ```bash
-pip install -r requirements.txt
+python -m venv .venv
+
+# macOS / Linux
+source .venv/bin/activate
+.venv/bin/python -m pip install -r requirements.txt
+
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+
 winget install Gyan.FFmpeg      # ffmpeg is required and is not a pip package
 ```
+
+After activation, the examples below work with `python`. You can also skip
+activation and invoke the virtual environment directly with
+`.venv/bin/python bgremove.py ...` on macOS/Linux or
+`.venv\Scripts\python.exe bgremove.py ...` on Windows.
 
 The matting model (14 MB) downloads automatically the first time you run it and
 is cached in `models/`.

@@ -8,6 +8,11 @@ usable GPU) against `Practice.mp4` — 640×360, 30 fps, 6571 frames, 3m39s.
 
 ## Quick start
 
+Run these commands with the project's virtual environment activated. On
+macOS/Linux, use `source .venv/bin/activate`; on Windows PowerShell, use
+`.venv\Scripts\Activate.ps1`. Alternatively, replace `python` below with
+`.venv/bin/python` on macOS/Linux or `.venv\Scripts\python.exe` on Windows.
+
 ```bash
 # green screen, ready to key in an editor          <- what you have now
 python bgremove.py Practice.mp4 --background greenscreen --crf 14
