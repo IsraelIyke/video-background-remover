@@ -1,8 +1,7 @@
 # bgremove
 
-> **CapCut is not recommended for editing the result.** CapCut often introduces
-> a halo around the subject after the project is closed and reopened. Use a
-> different video editor when possible.
+> **If using CapCut for editing, set to sys channel eg. pro4444 for the esport/result.** CapCut often introduces
+> a halo around the subject if the right export settings is not used. 
 
 Removes the background from a video, entirely on your own machine. No uploads,
 no account, no watermark, no per-minute pricing.
