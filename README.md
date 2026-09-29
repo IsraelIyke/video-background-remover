@@ -1,6 +1,6 @@
 # bgremove
 
-> **If using CapCut for editing, set to sys channel eg. pro4444 for the esport/result.** CapCut often introduces
+> **If using CapCut for editing, set to sys channel eg. pro4444 for the export/result.** CapCut often introduces
 > a halo around the subject if the right export settings is not used. 
 
 Removes the background from a video, entirely on your own machine. No uploads,
